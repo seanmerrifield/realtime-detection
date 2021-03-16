@@ -25,6 +25,8 @@
 import os
 import sys
 import logging as log
+import cv2
+import numpy as np
 from openvino.inference_engine import IENetwork, IECore
 
 
@@ -36,32 +38,122 @@ class Network:
 
     def __init__(self):
         ### TODO: Initialize any class variables desired ###
+        self.plugin = None
+        self.network = None
+        self.input_blob = None
+        self.output_blob = None
+        self.exec_network = None
+        self.infer_request = None
 
-    def load_model(self):
+    def load_model(self, model, device="CPU", cpu_extension=None):
         ### TODO: Load the model ###
         ### TODO: Check for supported layers ###
         ### TODO: Add any necessary extensions ###
         ### TODO: Return the loaded inference plugin ###
         ### Note: You may need to update the function parameters. ###
-        return
+        '''
+        Load the model given IR files.
+        Defaults to CPU as device for use in the workspace.
+        Synchronous requests made within.
+        '''
+        model_xml = model
+        model_bin = os.path.splitext(model_xml)[0] + ".bin"
+
+        # Initialize the plugin
+        self.plugin = IECore()
+
+        # Add a CPU extension, if applicable
+        if cpu_extension and "CPU" in device:
+            self.plugin.add_extension(cpu_extension, device)
+
+        # Read the IR as a IENetwork
+        self.network = IENetwork(model=model_xml, weights=model_bin)
+
+        # Load the IENetwork into the plugin
+        self.exec_network = self.plugin.load_network(self.network, device)
+
+        # Get the input layer
+        self.input_blob = next(iter(self.network.inputs))
+        self.output_blob = next(iter(self.network.outputs))
+
+        return self.plugin
 
     def get_input_shape(self):
         ### TODO: Return the shape of the input layer ###
-        return
+        return self.network.inputs[self.input_blob].shape
 
-    def exec_net(self):
+    def async_inference(self, image):
         ### TODO: Start an asynchronous request ###
         ### TODO: Return any necessary information ###
         ### Note: You may need to update the function parameters. ###
-        return
+        return self.exec_network.start_async(request_id=0, inputs={self.input_blob: image})
 
     def wait(self):
         ### TODO: Wait for the request to be complete. ###
         ### TODO: Return any necessary information ###
         ### Note: You may need to update the function parameters. ###
-        return
+        status = self.exec_network.requests[0].wait(-1)
+        return status
 
     def get_output(self):
         ### TODO: Extract and return the output results
         ### Note: You may need to update the function parameters. ###
-        return
+        return self.exec_network.requests[0].outputs[self.output_blob]
+
+    
+
+class ObjectDetection(Network):
+
+    def __init__(self):
+        super().__init__()
+
+
+    def postprocess(self, image, output, threshold=0.5, color="GREEN"):
+        '''
+        Using the model type, input image, and processed output,
+        creates an output image showing the result of inference.
+        '''
+        
+        color = color.lower()
+        color_channels = {"blue": (255,0,0), "green": (0,255,0), "red": (0,0,255)}
+        if color not in color_channels: raise Exception(f"Color: {color} is not a valid color option (must be blue, green, or red)")
+
+        #Remove excess dimensions so that it is a list of bounding boxes
+        output = output.squeeze()
+
+        image = np.copy(image)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        payload = {
+            'image': image,
+            'count': 0,
+            'n_classes': 0,
+            'labels': [],
+            'detections': []
+        }
+
+        for image_id, label, conf, x_min, y_min, x_max, y_max in output:
+
+            # Skip if confidence level is below 0.5
+            if conf < threshold: continue
+
+            x_min = int(x_min * image.shape[1])
+            x_max = int(x_max * image.shape[1])
+            y_min = int(y_min * image.shape[0])
+            y_max = int(y_max * image.shape[0])
+
+            # Add detection to image
+            payload['image'] = cv2.rectangle(image, (x_min, y_min), (x_max, y_max), color_channels[color], 2) 
+
+            # Add meta data about detection
+            payload['count'] += 1
+
+            payload['labels'].append(label)
+            payload['detections'].append({'class': label, 'x_min': x_min, 'x_max': x_max, 'y_min': y_min, 'y_max': y_max})
+
+        payload['labels'] = list(set(payload['labels']))
+        payload['n_classes'] = len(payload['labels'])
+
+
+        return payload
+        
